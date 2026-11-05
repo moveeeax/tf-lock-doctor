@@ -36,6 +36,8 @@ lock. A backend with no lock table has no lock to doctor.
 
 ## Install
 
+Requires Go 1.26 or newer.
+
 ```bash
 go install github.com/moveeeax/tf-lock-doctor/cmd/tf-lock-doctor@latest
 ```
@@ -63,6 +65,20 @@ tf-lock-doctor release --chdir ./envs/prod --force-after 2h --dry-run
 # Actually release it (requires confirmation)
 tf-lock-doctor release --chdir ./envs/prod --force-after 2h --yes
 ```
+
+### Workspaces
+
+By default the lock of the `default` workspace is used. Pass `--workspace` (a
+global flag, accepted by every command) to act on another workspace's lock:
+
+```bash
+tf-lock-doctor inspect --chdir ./envs/prod --workspace staging
+tf-lock-doctor release --chdir ./envs/prod --workspace staging --force-after 2h --dry-run
+```
+
+For a non-default workspace the lock item is looked up under Terraform's default
+workspace key prefix, i.e. `<bucket>/env:/<workspace>/<key>`. A custom
+`workspace_key_prefix` in the backend block is not honoured yet.
 
 Without `--force-after`, `release` will refuse to act: it has no evidence the
 holder is dead. That is the safe default.
