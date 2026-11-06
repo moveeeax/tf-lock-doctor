@@ -11,8 +11,10 @@ import (
 )
 
 type globalOpts struct {
-	chdir     string
-	workspace string
+	chdir          string
+	workspace      string
+	backendConfigs []string
+	fromInit       bool
 }
 
 func newRootCmd() *cobra.Command {
@@ -28,17 +30,22 @@ func newRootCmd() *cobra.Command {
 	}
 	cmd.PersistentFlags().StringVar(&opts.chdir, "chdir", ".", "Terraform module directory to read the backend config from")
 	cmd.PersistentFlags().StringVar(&opts.workspace, "workspace", "default", "Terraform workspace whose lock to act on")
+	cmd.PersistentFlags().StringArrayVar(&opts.backendConfigs, "backend-config", nil,
+		"backend config override, FILE or key=value, repeatable; applied in order like terraform init -backend-config")
+	cmd.PersistentFlags().BoolVar(&opts.fromInit, "from-init", false,
+		"read the backend config terraform init recorded in .terraform/terraform.tfstate instead of the backend block")
 
 	cmd.AddCommand(newInspectCmd(opts))
 	cmd.AddCommand(newReleaseCmd(opts))
 	return cmd
 }
 
-// resolveBackend parses the module's backend block and constructs the matching
-// Backend. Only backends tf-lock-doctor implements are accepted; others fail
-// with a clear message rather than pretending to work.
+// resolveBackend parses the module's backend block (or the config terraform
+// init recorded), applies the --backend-config overrides and constructs the
+// matching Backend. Only backends tf-lock-doctor implements are accepted;
+// others fail with a clear message rather than pretending to work.
 func resolveBackend(ctx context.Context, opts *globalOpts) (backend.Backend, hclconf.Config, error) {
-	cfg, err := hclconf.Load(opts.chdir)
+	cfg, err := loadConfig(opts)
 	if err != nil {
 		return nil, hclconf.Config{}, err
 	}
@@ -50,4 +57,18 @@ func resolveBackend(ctx context.Context, opts *globalOpts) (backend.Backend, hcl
 	default:
 		return nil, cfg, fmt.Errorf("backend %q is not supported yet; tf-lock-doctor currently implements: s3", cfg.Type)
 	}
+}
+
+// loadConfig returns the merged backend config: the backend block, or the
+// recorded init state with --from-init, then every --backend-config item.
+func loadConfig(opts *globalOpts) (hclconf.Config, error) {
+	load := hclconf.Load
+	if opts.fromInit {
+		load = hclconf.LoadInit
+	}
+	cfg, err := load(opts.chdir)
+	if err != nil {
+		return hclconf.Config{}, err
+	}
+	return hclconf.ApplyBackendConfig(cfg, opts.backendConfigs, opts.chdir)
 }

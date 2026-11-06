@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -23,6 +24,10 @@ type S3Config struct {
 	Table     string // DynamoDB lock table (backend attr: dynamodb_table)
 	Region    string
 	Workspace string // defaults to "default"
+
+	// WorkspaceKeyPrefix is the key prefix for non-default workspaces
+	// (backend attr: workspace_key_prefix), defaulting to "env:".
+	WorkspaceKeyPrefix string
 }
 
 // ddbAPI is the subset of the DynamoDB client tf-lock-doctor uses, extracted so
@@ -41,7 +46,7 @@ type s3Backend struct {
 // config, or instance role), honouring the region from the backend config.
 func NewS3(ctx context.Context, cfg S3Config) (Backend, error) {
 	if cfg.Bucket == "" || cfg.Key == "" {
-		return nil, errors.New("s3 backend requires bucket and key")
+		return nil, errors.New("s3 backend requires bucket and key; pass them with --backend-config, or use --from-init after terraform init")
 	}
 	if cfg.Table == "" {
 		return nil, errors.New("s3 backend has no dynamodb_table; state locking is not enabled for this backend")
@@ -62,18 +67,26 @@ func newS3WithClient(cfg S3Config, client ddbAPI) Backend {
 	return &s3Backend{cfg: cfg, client: client}
 }
 
+// defaultWorkspaceKeyPrefix is Terraform's default for workspace_key_prefix.
+const defaultWorkspaceKeyPrefix = "env:"
+
 func (b *s3Backend) Name() string { return "s3" }
 
 // lockID reproduces Terraform's DynamoDB LockID for the digest item:
 // "<bucket>/<path>" where path includes the workspace prefix for non-default
 // workspaces. This is the item that stores the lock Info document.
 func (b *s3Backend) lockID() string {
-	path := b.cfg.Key
+	key := b.cfg.Key
 	if ws := b.cfg.Workspace; ws != "" && ws != "default" {
-		// Terraform stores non-default workspaces under env:/<ws>/<key>.
-		path = "env:/" + ws + "/" + b.cfg.Key
+		// Terraform stores non-default workspaces under
+		// <workspace_key_prefix>/<ws>/<key>, joined with path.Join.
+		prefix := b.cfg.WorkspaceKeyPrefix
+		if prefix == "" {
+			prefix = defaultWorkspaceKeyPrefix
+		}
+		key = path.Join(prefix, ws, b.cfg.Key)
 	}
-	return b.cfg.Bucket + "/" + path
+	return b.cfg.Bucket + "/" + key
 }
 
 func (b *s3Backend) Read(ctx context.Context) (lock.Info, error) {
@@ -140,9 +153,14 @@ func FromAttrs(attrs map[string]string, workspace string) S3Config {
 		Table:     attrs["dynamodb_table"],
 		Region:    attrs["region"],
 		Workspace: workspace,
+
+		WorkspaceKeyPrefix: attrs["workspace_key_prefix"],
 	}
 	if cfg.Workspace == "" {
 		cfg.Workspace = "default"
+	}
+	if cfg.WorkspaceKeyPrefix == "" {
+		cfg.WorkspaceKeyPrefix = defaultWorkspaceKeyPrefix
 	}
 	return cfg
 }

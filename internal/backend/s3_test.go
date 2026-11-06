@@ -104,3 +104,27 @@ func TestLockIDNonDefaultWorkspace(t *testing.T) {
 		t.Fatalf("lockID() = %q, want %q", got, want)
 	}
 }
+
+func TestLockIDCustomWorkspaceKeyPrefix(t *testing.T) {
+	cfg := FromAttrs(map[string]string{
+		"bucket": "my-bucket", "key": "app/terraform.tfstate", "dynamodb_table": "t",
+		"workspace_key_prefix": "workspaces/",
+	}, "staging")
+	b := &s3Backend{cfg: cfg}
+	if got, want := b.lockID(), "my-bucket/workspaces/staging/app/terraform.tfstate"; got != want {
+		t.Fatalf("lockID() = %q, want %q", got, want)
+	}
+
+	// The default workspace never carries the prefix.
+	b.cfg.Workspace = "default"
+	if got, want := b.lockID(), "my-bucket/app/terraform.tfstate"; got != want {
+		t.Fatalf("default workspace lockID() = %q, want %q", got, want)
+	}
+}
+
+func TestFromAttrsDefaultsWorkspaceKeyPrefix(t *testing.T) {
+	cfg := FromAttrs(map[string]string{"bucket": "b", "key": "k"}, "")
+	if cfg.WorkspaceKeyPrefix != "env:" || cfg.Workspace != "default" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}

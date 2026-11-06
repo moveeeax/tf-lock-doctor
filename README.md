@@ -50,7 +50,8 @@ make build   # produces ./bin/tf-lock-doctor
 
 ## Usage
 
-The backend config is read from the Terraform module directory you point `--chdir` at.
+The backend config is read from the Terraform module directory you point `--chdir` at,
+merged with any `--backend-config` items (see [Partial backend configuration](#partial-backend-configuration)).
 
 ```bash
 # See who holds the lock, if anyone
@@ -76,9 +77,41 @@ tf-lock-doctor inspect --chdir ./envs/prod --workspace staging
 tf-lock-doctor release --chdir ./envs/prod --workspace staging --force-after 2h --dry-run
 ```
 
-For a non-default workspace the lock item is looked up under Terraform's default
-workspace key prefix, i.e. `<bucket>/env:/<workspace>/<key>`. A custom
-`workspace_key_prefix` in the backend block is not honoured yet.
+For a non-default workspace the lock item is looked up under the backend's
+`workspace_key_prefix`, i.e. `<bucket>/<workspace_key_prefix>/<workspace>/<key>`.
+The prefix defaults to `env:`, as in Terraform, and can come from the backend
+block, a `--backend-config` item or the recorded init state.
+
+### Partial backend configuration
+
+Terraform recommends keeping `bucket`, `key` and `region` out of the backend
+block and passing them to `terraform init -backend-config`. `tf-lock-doctor`
+takes the same flag. `--backend-config` is global and repeatable; each item is
+either `key=value` or the path of a file of top-level attributes (a
+`*.tfbackend` file). Items are applied in order on top of the backend block, so
+a later value wins, the same merge order as `terraform init`. A relative file
+path is resolved against `--chdir` first, like `terraform -chdir`, then against
+the current directory.
+
+```bash
+# backend "s3" {} in the module, the rest in a file plus one override
+tf-lock-doctor inspect --chdir ./envs/prod \
+  --backend-config prod.s3.tfbackend \
+  --backend-config key=prod/network.tfstate
+```
+
+If the module is already initialised, `--from-init` reads the backend config
+`terraform init` recorded in `.terraform/terraform.tfstate` (or under
+`$TF_DATA_DIR`), which already has every `-backend-config` item merged in. The
+backend block is not read then; `--backend-config` items still apply on top.
+
+```bash
+terraform -chdir=envs/prod init -backend-config=prod.s3.tfbackend
+tf-lock-doctor inspect --chdir ./envs/prod --from-init
+```
+
+Only string values are used, from the block, the files and the init state
+alike; a value built from a function or reference in the block is skipped.
 
 Without `--force-after`, `release` will refuse to act: it has no evidence the
 holder is dead. That is the safe default.

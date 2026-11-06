@@ -3,6 +3,7 @@
 package hclconf
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -138,4 +139,105 @@ func hasFatal(diags hcl.Diagnostics) bool {
 		}
 	}
 	return false
+}
+
+// ApplyBackendConfig merges -backend-config style overrides into cfg the way
+// `terraform init` does: items are applied in order and a later value wins
+// over an earlier one and over the backend block. An item containing "=" is a
+// key=value pair; anything else is the path of a file of top-level attributes
+// (a *.tfbackend file). A relative path is resolved against dir first, as
+// `terraform -chdir=<dir> init` would, then against the current directory.
+func ApplyBackendConfig(cfg Config, items []string, dir string) (Config, error) {
+	merged := make(map[string]string, len(cfg.Attrs))
+	for k, v := range cfg.Attrs {
+		merged[k] = v
+	}
+	for _, item := range items {
+		if eq := strings.Index(item, "="); eq >= 0 {
+			name := strings.TrimSpace(item[:eq])
+			if name == "" {
+				return Config{}, fmt.Errorf("backend config %q: empty key", item)
+			}
+			merged[name] = item[eq+1:]
+			continue
+		}
+		attrs, err := loadBackendConfigFile(resolvePath(item, dir))
+		if err != nil {
+			return Config{}, err
+		}
+		for k, v := range attrs {
+			merged[k] = v
+		}
+	}
+	cfg.Attrs = merged
+	return cfg, nil
+}
+
+func resolvePath(p, dir string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	inDir := filepath.Join(dir, p)
+	if _, err := os.Stat(inDir); err == nil {
+		return inDir
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	return inDir
+}
+
+func loadBackendConfigFile(path string) (map[string]string, error) {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read backend config file: %w", err)
+	}
+	file, diags := hclparse.NewParser().ParseHCL(src, path)
+	if diags.HasErrors() {
+		return nil, fmt.Errorf("parse %s: %s", path, diags.Error())
+	}
+	return stringAttrs(file.Body)
+}
+
+// initState is the part of .terraform/terraform.tfstate that `terraform init`
+// writes to record the backend it configured, after merging the backend block
+// with every -backend-config item.
+type initState struct {
+	Backend *struct {
+		Type   string                     `json:"type"`
+		Config map[string]json.RawMessage `json:"config"`
+	} `json:"backend"`
+}
+
+// LoadInit reads the backend configuration that `terraform init` recorded in
+// the module's data directory (.terraform, or $TF_DATA_DIR relative to dir).
+// Only string values are kept, matching what Load extracts from HCL.
+func LoadInit(dir string) (Config, error) {
+	dataDir := os.Getenv("TF_DATA_DIR")
+	if dataDir == "" {
+		dataDir = ".terraform"
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir = filepath.Join(dir, dataDir)
+	}
+	path := filepath.Join(dataDir, "terraform.tfstate")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read init state (run terraform init first): %w", err)
+	}
+	var st initState
+	if err := json.Unmarshal(src, &st); err != nil {
+		return Config{}, fmt.Errorf("decode %s: %w", path, err)
+	}
+	if st.Backend == nil || st.Backend.Type == "" {
+		return Config{}, fmt.Errorf("%s records no backend", path)
+	}
+	attrs := map[string]string{}
+	for name, raw := range st.Backend.Config {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+			attrs[name] = s
+		}
+	}
+	return Config{Type: st.Backend.Type, Attrs: attrs}, nil
 }
